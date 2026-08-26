@@ -1,11 +1,15 @@
-from telegram import Update
+from telegram import Update, ChatPermissions
 from telegram.ext import (
     Application,
     MessageHandler,
     ContextTypes,
     filters,
 )
+import time
+import asyncio
+import re
 
+from telegram.error import BadRequest
 from config import BOT_TOKEN, ALLOWED_GROUPS
 from welcome import welcome
 from moderation import contains_link
@@ -14,150 +18,139 @@ from ai_filter import moderate_message
 from strikes import add_strike
 from logger import save_log, send_log
 
+# Specific banned words list (checked case-insensitively)
+EXPLICIT_BANNED_WORDS = ["tmkc", "bsdk", "madarchot", "bhosadike"]
+
 
 async def is_admin(chat, user_id):
-    member = await chat.get_member(user_id)
-    return member.status in ("administrator", "creator")
+    try:
+        member = await chat.get_member(user_id)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+
+def has_excessive_special_chars(text):
+    """Checks if the text contains more than 2 special characters/symbols."""
+    special_chars = re.findall(r'[^a-zA-Z0-9\s]', text)
+    return len(special_chars) > 2
+
+
+async def punish_user(update, context, chat, user, reason):
+    """Blazing fast punishment pipeline: Deletes message, mutes for 5 mins, and warns."""
+    # 1. Delete instantly
+    try:
+        await update.message.delete()
+    except BadRequest:
+        pass
+        
+    # 2. Mute the user for 5 minutes (300 seconds)
+    try:
+        mute_until = int(time.time()) + 300
+        await context.bot.restrict_chat_member(
+            chat_id=chat.id,
+            user_id=user.id,
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=mute_until
+        )
+    except Exception:
+        pass
+        
+    # 3. Send warning
+    try:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=f"⚠️ **{user.full_name}** was muted for 5 minutes. Reason: *{reason}*",
+            parse_mode="Markdown"
+        )
+    except Exception:
+        pass
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     if not update.message or not update.message.text:
         return
 
     chat = update.effective_chat
     user = update.effective_user
     text = update.message.text
+    text_lower = text.lower()
 
-    print(f"Chat ID: {chat.id}")
-    print(f"Chat Type: {chat.type}")
-    print(f"User: {user.full_name}")
-
-
-    # Ignore private chats
+    # Ignore private chats, unauthorized groups, bots, and admins instantly
     if chat.type == "private":
         return
-
-    # Ignore groups that are not allowed
     if ALLOWED_GROUPS and chat.id not in ALLOWED_GROUPS:
         return
-
-    # Ignore messages from bots
     if user.is_bot:
         return
-
-    # Ignore owner and admins
     if await is_admin(chat, user.id):
         return
 
+    # ==========================================
+    # PHASE 1: INSTANT LOCAL CHECKS (0-millisecond delay)
+    # ==========================================
+    
+    # 1. Check explicit banned words instantly
+    if any(word in text_lower for word in EXPLICIT_BANNED_WORDS):
+        await punish_user(update, context, chat, user, "Use of prohibited abusive words")
+        strikes, action = add_strike(chat.id, user.id, user.username or user.full_name, "Banned word detected")
+        save_log(chat.id, user.id, action, "Banned word detected", 90)
+        await send_log(context, user.username or user.full_name, user.id, action, "Banned word detected", 90)
+        return
 
-    # Link detection
+    # 2. Check for more than 2 special characters instantly
+    if has_excessive_special_chars(text):
+        await punish_user(update, context, chat, user, "Excessive special characters/symbols spam")
+        strikes, action = add_strike(chat.id, user.id, user.username or user.full_name, "Excessive special characters")
+        save_log(chat.id, user.id, action, "Excessive special characters", 80)
+        await send_log(context, user.username or user.full_name, user.id, action, "Excessive special characters", 80)
+        return
+
+    # 3. Check Links instantly
     if contains_link(text):
-        await update.message.delete()
-
-        strikes, action = add_strike(
-            chat.id,
-            user.id,
-            user.username or user.full_name,
-            "Link detected"
-        )
-
+        await punish_user(update, context, chat, user, "Unauthorized link detected")
+        strikes, action = add_strike(chat.id, user.id, user.username or user.full_name, "Link detected")
         save_log(chat.id, user.id, action, "Link detected", 80)
-        await send_log(
-            context,
-            user.username or user.full_name,
-            user.id,
-            action,
-            "Link detected",
-            80,
-        )
-
+        await send_log(context, user.username or user.full_name, user.id, action, "Link detected", 80)
         return
 
-    # Spam detection
+    # 4. Check Spam patterns instantly
     spam = check_spam(chat.id, user.id, text)
-
     if spam["spam"]:
-        await update.message.delete()
-
-        strikes, action = add_strike(
-            chat.id,
-            user.id,
-            user.username or user.full_name,
-            spam["reason"],
-        )
-
-        save_log(
-            chat.id,
-            user.id,
-            action,
-            spam["reason"],
-            spam["severity"],
-        )
-
-        await send_log(
-            context,
-            user.username or user.full_name,
-            user.id,
-            action,
-            spam["reason"],
-            spam["severity"],
-        )
-
+        await punish_user(update, context, chat, user, spam["reason"])
+        strikes, action = add_strike(chat.id, user.id, user.username or user.full_name, spam["reason"])
+        save_log(chat.id, user.id, action, spam["reason"], spam["severity"])
+        await send_log(context, user.username or user.full_name, user.id, action, spam["reason"], spam["severity"])
         return
 
-    # AI moderation
-    ai = moderate_message(text)
+    # ==========================================
+    # PHASE 2: NON-BLOCKING BACKGROUND AI WORKER
+    # ==========================================
+    # We define a helper task and fire it off cleanly so it never holds up message tracking
+    async def run_ai_background():
+        try:
+            # Run the synchronous API call in a thread executor so it doesn't block the async loop
+            loop = asyncio.get_running_loop()
+            ai = await loop.run_in_executor(None, moderate_message, text)
+            
+            if ai and ai.get("action") != "allow":
+                await punish_user(update, context, chat, user, ai.get("reason", "AI Moderation Flag"))
+                add_strike(chat.id, user.id, user.username or user.full_name, ai.get("reason", "AI Flag"))
+                save_log(chat.id, user.id, "strike", ai.get("reason", "AI Flag"), ai.get("severity", 50))
+        except Exception as e:
+            print(f"Background AI worker exception: {e}")
 
-    if ai["action"] != "allow":
-
-        await update.message.delete()
-
-        strikes, action = add_strike(
-            chat.id,
-            user.id,
-            user.username or user.full_name,
-            ai["reason"],
-        )
-
-        save_log(
-            chat.id,
-            user.id,
-            action,
-            ai["reason"],
-            ai["severity"],
-        )
-
-        await send_log(
-            context,
-            user.username or user.full_name,
-            user.id,
-            action,
-            ai["reason"],
-            ai["severity"],
-        )
+    # Dispatch background task safely without awaiting its completion here
+    asyncio.create_task(run_ai_background())
 
 
 def main():
+    app = Application.builder().token(BOT_TOKEN).connect_timeout(60.0).read_timeout(60.0).build()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.add_handler(
-        MessageHandler(
-            filters.StatusUpdate.NEW_CHAT_MEMBERS,
-            welcome,
-        )
-    )
-
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message,
-        )
-    )
-
-    print("Bot is running...")
-
+    print("Bot is running at maximum velocity...")
     app.run_polling()
 
 
