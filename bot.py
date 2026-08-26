@@ -8,6 +8,9 @@ from telegram.ext import (
 import time
 import asyncio
 import re
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import os
 
 from telegram.error import BadRequest
 from config import BOT_TOKEN, ALLOWED_GROUPS
@@ -20,6 +23,27 @@ from logger import save_log, send_log
 
 # Specific banned words list (checked case-insensitively)
 EXPLICIT_BANNED_WORDS = ["tmkc", "bsdk", "madarchot", "bhosadike"]
+
+
+# --- KEEP-ALIVE WEB SERVER FOR RENDER FREE TIER ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Telegram Moderator Bot is active and running!")
+        
+    def log_message(self, format, *args):
+        return
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+def start_keep_alive():
+    t = threading.Thread(target=run_http_server)
+    t.daemon = True
+    t.start()
 
 
 async def is_admin(chat, user_id):
@@ -126,10 +150,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ==========================================
     # PHASE 2: NON-BLOCKING BACKGROUND AI WORKER
     # ==========================================
-    # We define a helper task and fire it off cleanly so it never holds up message tracking
     async def run_ai_background():
         try:
-            # Run the synchronous API call in a thread executor so it doesn't block the async loop
             loop = asyncio.get_running_loop()
             ai = await loop.run_in_executor(None, moderate_message, text)
             
@@ -140,11 +162,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Background AI worker exception: {e}")
 
-    # Dispatch background task safely without awaiting its completion here
     asyncio.create_task(run_ai_background())
 
 
 def main():
+    # Start the keep-alive server so Render detects an active port binding
+    start_keep_alive()
+
     app = Application.builder().token(BOT_TOKEN).connect_timeout(60.0).read_timeout(60.0).build()
 
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
