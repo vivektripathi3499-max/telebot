@@ -11,6 +11,7 @@ import re
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import os
+from collections import defaultdict
 
 from telegram.error import BadRequest
 from config import BOT_TOKEN, ALLOWED_GROUPS
@@ -22,7 +23,15 @@ from strikes import add_strike
 from logger import save_log, send_log
 
 # Specific banned words list (checked case-insensitively)
-EXPLICIT_BANNED_WORDS = ["tmkc", "bsdk", "madarchot", "bhosadike"]
+EXPLICIT_BANNED_WORDS = ["tmkc", "bsdk", "madarchot", "bhosadike", "Bkl", "bkl", "Mdrcd", "Mdrchd"]
+
+# Banned sticker packs (optional: add known abusive pack shortnames here)
+BANNED_STICKER_SETS = set()
+
+# In-memory dictionary for rapid sticker flood rate-limiting: {user_id: [timestamp1, timestamp2, ...]}
+user_sticker_timestamps = defaultdict(list)
+STICKER_RATE_LIMIT_COUNT = 3
+STICKER_RATE_LIMIT_WINDOW = 5.0  # seconds
 
 
 # --- KEEP-ALIVE WEB SERVER FOR RENDER FREE TIER ---
@@ -89,6 +98,52 @@ async def punish_user(update, context, chat, user, reason):
         )
     except Exception:
         pass
+
+
+def check_sticker_flood(user_id):
+    """Returns True if the user is flooding stickers too fast."""
+    now = time.time()
+    timestamps = user_sticker_timestamps[user_id]
+    timestamps = [t for t in timestamps if now - t < STICKER_RATE_LIMIT_WINDOW]
+    timestamps.append(now)
+    user_sticker_timestamps[user_id] = timestamps
+    return len(timestamps) > STICKER_RATE_LIMIT_COUNT
+
+
+async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles incoming stickers, checks for flood spam or prohibited sticker packs."""
+    if not update.message or not update.message.sticker:
+        return
+
+    chat = update.effective_chat
+    user = update.effective_user
+    sticker = update.message.sticker
+
+    # Ignore private chats, unauthorized groups, bots, and admins instantly
+    if chat.type == "private":
+        return
+    if ALLOWED_GROUPS and chat.id not in ALLOWED_GROUPS:
+        return
+    if user.is_bot:
+        return
+    if await is_admin(chat, user.id):
+        return
+
+    reason = None
+
+    # 1. Check if sticker belongs to a banned pack
+    if sticker.set_name and sticker.set_name in BANNED_STICKER_SETS:
+        reason = "Prohibited sticker pack detected"
+
+    # 2. Check for sticker flooding / spamming
+    elif check_sticker_flood(user.id):
+        reason = "Sticker spamming / flooding"
+
+    if reason:
+        await punish_user(update, context, chat, user, reason)
+        strikes, action = add_strike(chat.id, user.id, user.username or user.full_name, reason)
+        save_log(chat.id, user.id, action, reason, 85)
+        await send_log(context, user.username or user.full_name, user.id, action, reason, 85)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -172,9 +227,10 @@ def main():
     app = Application.builder().token(BOT_TOKEN).connect_timeout(60.0).read_timeout(60.0).build()
 
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
+    app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Bot is running at maximum velocity...")
+    print("Bot is running at maximum velocity with sticker protection...")
     app.run_polling()
 
 
