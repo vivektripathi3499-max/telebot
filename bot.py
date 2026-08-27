@@ -18,7 +18,7 @@ from config import BOT_TOKEN, ALLOWED_GROUPS
 from welcome import welcome
 from moderation import contains_link
 from spam import check_spam
-from ai_filter import moderate_message
+from ai_filter import moderate_message, moderate_image
 from strikes import add_strike
 from logger import save_log, send_log
 
@@ -27,6 +27,9 @@ EXPLICIT_BANNED_WORDS = ["tmkc", "bsdk", "madarchot", "bhosadike", "Bkl", "bkl",
 
 # Banned sticker packs (optional: add known abusive pack shortnames here)
 BANNED_STICKER_SETS = set()
+
+# Restricted or abusive emojis often attached to offensive stickers
+RESTRICTED_STICKER_EMOJIS = {"🖕", "🤬", "💩"}
 
 # In-memory dictionary for rapid sticker flood rate-limiting: {user_id: [timestamp1, timestamp2, ...]}
 user_sticker_timestamps = defaultdict(list)
@@ -111,7 +114,7 @@ def check_sticker_flood(user_id):
 
 
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles incoming stickers, checks for flood spam or prohibited sticker packs."""
+    """Handles incoming stickers, checks for flood spam, restricted emojis, prohibited packs, or AI vision flags."""
     if not update.message or not update.message.sticker:
         return
 
@@ -135,7 +138,11 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sticker.set_name and sticker.set_name in BANNED_STICKER_SETS:
         reason = "Prohibited sticker pack detected"
 
-    # 2. Check for sticker flooding / spamming
+    # 2. Check if sticker is paired with an abusive/vulgar emoji
+    elif sticker.emoji and sticker.emoji in RESTRICTED_STICKER_EMOJIS:
+        reason = "Inappropriate emoji attached to sticker"
+
+    # 3. Check for sticker flooding / spamming
     elif check_sticker_flood(user.id):
         reason = "Sticker spamming / flooding"
 
@@ -144,6 +151,40 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         strikes, action = add_strike(chat.id, user.id, user.username or user.full_name, reason)
         save_log(chat.id, user.id, action, reason, 85)
         await send_log(context, user.username or user.full_name, user.id, action, reason, 85)
+        return
+
+    # ==========================================
+    # PHASE 2: NON-BLOCKING BACKGROUND AI VISION WORKER FOR STICKERS
+    # ==========================================
+    async def run_sticker_ai_background():
+        file_path = f"temp_sticker_{user.id}_{int(time.time())}.webp"
+        try:
+            # Download the sticker file
+            file = await sticker.get_file()
+            await file.download_to_drive(file_path)
+
+            # Run Gemini vision check in executor to scan for vulgar drawings, text, or explicit content
+            loop = asyncio.get_running_loop()
+            ai = await loop.run_in_executor(None, moderate_image, file_path)
+
+            if ai and ai.get("action") != "allow":
+                ai_reason = ai.get("reason", "Inappropriate sticker content")
+                await punish_user(update, context, chat, user, ai_reason)
+                add_strike(chat.id, user.id, user.username or user.full_name, ai_reason)
+                save_log(chat.id, user.id, "strike", ai_reason, ai.get("severity", 80))
+                await send_log(context, user.username or user.full_name, user.id, "strike", ai_reason, ai.get("severity", 80))
+
+        except Exception as e:
+            print(f"Background Sticker AI worker exception: {e}")
+        finally:
+            # Clean up temp file
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+
+    asyncio.create_task(run_sticker_ai_background())
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -230,7 +271,7 @@ def main():
     app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Bot is running at maximum velocity with sticker protection...")
+    print("Bot is running at maximum velocity with advanced sticker and text protection...")
     app.run_polling()
 
 
