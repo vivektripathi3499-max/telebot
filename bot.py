@@ -23,7 +23,7 @@ from strikes import add_strike
 from logger import save_log, send_log
 
 # Specific banned words list (checked case-insensitively)
-EXPLICIT_BANNED_WORDS = ["tmkc", "bsdk", "madarchot", "bhosadike", "Bkl", "bkl", "Mdrcd", "Mdrchd"]
+EXPLICIT_BANNED_WORDS = ["tmkc", "bsdk", "madarchot", "bhosadike", "Bkl", "bkl", "Mdrcd", "Mdrchd", "Saala", "Saali"]
 
 # Banned sticker packs (optional: add known abusive pack shortnames here)
 BANNED_STICKER_SETS = set()
