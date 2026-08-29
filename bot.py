@@ -35,6 +35,18 @@ EXPLICIT_BANNED_WORDS = [
     "Add me",
     "Added",
     "Msg me",
+    "dm me",
+    "inbox me",
+    "come inbox",
+    "pm me",
+    "sex video",
+    "adult video",
+    "hot video",
+    "mms",
+    "want fun",
+    "video call",
+    "whatsapp number",
+    "telegram dm",
 ]
 
 BANNED_STICKER_SETS = set()
@@ -246,10 +258,19 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return
 
   caption = msg.caption or ""
-  if contains_link(caption) or any(
-      p in caption.lower() for p in PROMOTION_PHRASES
+  
+  # Normalize caption to catch words embedded inside sentences
+  caption_lower = caption.lower()
+  caption_clean = re.sub(r'[\s\-_.,]+', '', caption_lower)
+  normalized_banned = [re.sub(r'[\s\-_.,]+', '', w.lower()) for w in EXPLICIT_BANNED_WORDS]
+
+  if (
+      contains_link(caption)
+      or any(p in caption_lower for p in PROMOTION_PHRASES)
+      or any(word in caption_lower for word in EXPLICIT_BANNED_WORDS)
+      or any(nb in caption_clean for nb in normalized_banned if len(nb) > 2)
   ):
-    reason = "Unauthorized link or promotion in media caption"
+    reason = "Unauthorized link, promotion, or prohibited words in media caption"
     await punish_user(update, context, chat, user, reason)
     asyncio.create_task(async_log_pipeline(context, chat.id, user, reason, 85))
     return
@@ -314,6 +335,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
   text = update.message.text
   text_lower = text.lower()
   
+  # Normalize text to catch words embedded anywhere inside sentences or obscured with punctuation/spaces
   text_clean = re.sub(r'[\s\-_.,]+', '', text_lower)
 
   if (
@@ -326,8 +348,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
   normalized_banned = [re.sub(r'[\s\-_.,]+', '', w.lower()) for w in EXPLICIT_BANNED_WORDS]
 
+  # Check if any banned word appears as a standalone substring or embedded inside other words/sentences
   if any(word in text_lower for word in EXPLICIT_BANNED_WORDS) or any(nb in text_clean for nb in normalized_banned if len(nb) > 2):
-    reason = "Use of prohibited abusive words"
+    reason = "Use of prohibited abusive words or solicitation"
     await punish_user(update, context, chat, user, reason)
     asyncio.create_task(async_log_pipeline(context, chat.id, user, reason, 90))
     return
