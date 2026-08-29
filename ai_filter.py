@@ -1,46 +1,31 @@
 import os
 import json
 from google import genai
+from google.genai import types
 from PIL import Image
 from config import GEMINI_API_KEY
 
-# Initialize the official Google GenAI client
+# Initialize the official Google GenAI client with low-latency settings
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-SYSTEM_PROMPT = """
-You are a Telegram group moderation AI. 
-Analyze the given message for toxicity, hate speech, severe insults, harassment, threats, scams, or explicit abuse.
+SYSTEM_PROMPT = """Analyze the message for toxicity, hate speech, severe insults, harassment, threats, scams, or explicit abuse. Return ONLY a valid JSON object: {"action": "allow" or "block", "reason": "...", "severity": 0-100}"""
 
-You must reply with a valid JSON object ONLY. No markdown formatting (no ```json code blocks), no explanations, and no extra text.
+VISION_SYSTEM_PROMPT = """Analyze this image/sticker/GIF for vulgar text, abusive drawings, hand gestures, hate symbols, or explicit/sexual content. Return ONLY a valid JSON object: {"action": "allow" or "block", "reason": "...", "severity": 0-100}"""
 
-Format:
-{
-  "action": "allow" or "block",
-  "reason": "Short description of why it was blocked, or Safe if allowed",
-  "severity": number from 0 to 100
-}
-"""
-
-VISION_SYSTEM_PROMPT = """
-You are a Telegram group moderation AI inspecting a sticker image sent by a user.
-Analyze the sticker image for vulgar text (OCR), abusive drawings, hand gestures, hate symbols, or explicit/sexual content.
-
-You must reply with a valid JSON object ONLY. No markdown formatting (no ```json code blocks), no explanations, and no extra text.
-
-Format:
-{
-  "action": "allow" or "block",
-  "reason": "Short description of why the sticker was blocked, or Safe if allowed",
-  "severity": number from 0 to 100
-}
-"""
+# Ultra-fast configuration configuration using Gemini Flash with low token limits
+FAST_CONFIG = types.GenerateContentConfig(
+    temperature=0.1,
+    max_output_tokens=60,
+    response_mime_type="application/json",
+)
 
 def moderate_message(message):
-    """Sends text to Gemini to check for abuse or toxicity and returns a dict."""
+    """Sends text to Gemini with ultra-fast json configuration."""
     try:
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=f"{SYSTEM_PROMPT}\n\nMessage:\n{message}"
+            contents=f"{SYSTEM_PROMPT}\n\nMessage:\n{message}",
+            config=FAST_CONFIG
         )
         
         text = response.text.strip()
@@ -59,12 +44,22 @@ def moderate_message(message):
         }
 
 def moderate_image(file_path):
-    """Sends a sticker image to Gemini to check for visual vulgarity or text abuse."""
+    """Sends image/sticker/GIF to Gemini with optimized sizing for maximum speed."""
     try:
+        # Resize large images down to max 512px to accelerate network upload and inference time
+        with Image.open(file_path) as img:
+            img.verify()
+            
         image = Image.open(file_path)
+        if image.mode in ("RGBA", "P"):
+            image = image.convert("RGB")
+            
+        image.thumbnail((512, 512))
+
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[image, VISION_SYSTEM_PROMPT]
+            contents=[image, VISION_SYSTEM_PROMPT],
+            config=FAST_CONFIG
         )
         
         text = response.text.strip()

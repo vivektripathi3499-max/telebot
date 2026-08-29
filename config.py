@@ -12,7 +12,7 @@ MUTE_MINUTES = int(os.getenv("MUTE_MINUTES", "5"))
 MAX_STRIKES = int(os.getenv("MAX_STRIKES", "5"))
 
 ALLOWED_GROUPS = [
-    int(group_id)
+    int(group_id.strip())
     for group_id in os.getenv("ALLOWED_GROUPS", "").split(",")
     if group_id.strip()
 ]
