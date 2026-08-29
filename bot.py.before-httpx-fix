@@ -8,8 +8,6 @@ from collections import defaultdict
 
 from telegram import ChatPermissions, Update
 from telegram.error import BadRequest, TelegramError
-from telegram.request import HTTPXRequest
-
 from telegram.ext import (
     Application,
     ContextTypes,
@@ -1252,18 +1250,13 @@ def main():
 
     start_keep_alive()
 
-    telegram_request = HTTPXRequest(
-        connect_timeout=30.0,
-        read_timeout=30.0,
-        write_timeout=30.0,
-        pool_timeout=30.0,
-        connection_pool_size=32,
-    )
-
     application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .request(telegram_request)
+        .connect_timeout(15.0)
+        .read_timeout(15.0)
+        .write_timeout(15.0)
+        .pool_timeout(15.0)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()

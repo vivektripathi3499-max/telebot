@@ -1,78 +1,143 @@
-from datetime import timedelta
-import discord
-from discord.ext import commands
-import re
+"""
+Telegram moderation utilities.
 
+This module contains fast, local checks only.
+It intentionally has no Discord dependency.
+"""
+
+import re
+from urllib.parse import urlparse
+
+
+# Common URL patterns.
 LINK_PATTERN = re.compile(
-    r"(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+|discord\.gg/\S+|bit\.ly/\S+|tinyurl\.com/\S+)",
-    re.IGNORECASE,
+    r"""
+    (?:
+        https?://[^\s<>()]+
+        |
+        www\.[^\s<>()]+
+        |
+        t\.me/[^\s<>()]+
+        |
+        telegram\.me/[^\s<>()]+
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+# Telegram invite/link indicators.
+TELEGRAM_LINK_PATTERN = re.compile(
+    r"""
+    (?:
+        https?://
+        |
+        www\.
+    )?
+    (?:
+        t\.me
+        |
+        telegram\.me
+    )
+    /
+    [^\s<>()]+
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 
 def contains_link(text: str) -> bool:
-  if not text:
-    return False
-  return bool(LINK_PATTERN.search(text))
+    """
+    Return True if the supplied text contains a URL
+    or common Telegram link.
+    """
+
+    if not text:
+        return False
+
+    return bool(LINK_PATTERN.search(text))
 
 
-class Moderation(commands.Cog):
+def contains_telegram_link(text: str) -> bool:
+    """
+    Return True if the supplied text contains a Telegram link.
+    """
 
-  def __init__(self, bot):
-    self.bot = bot
+    if not text:
+        return False
 
-  @commands.Cog.listener()
-  async def on_message(self, message: discord.Message):
-    if message.author.bot or not message.guild:
-      return
+    return bool(TELEGRAM_LINK_PATTERN.search(text))
 
-    content = message.content or ""
-    content_lower = content.lower()
 
-    # 1. Check for links, channel promotions, or "link in bio" / asking for DMs
-    has_link_flag = contains_link(content)
-    evasion_phrases = [
+def extract_links(text: str) -> list[str]:
+    """
+    Return all detected links from text.
+    """
+
+    if not text:
+        return []
+
+    return LINK_PATTERN.findall(text)
+
+
+def get_domain(url: str) -> str:
+    """
+    Extract a normalized domain from a URL.
+    """
+
+    if not url:
+        return ""
+
+    value = url.strip()
+
+    if not value.startswith(("http://", "https://")):
+        value = "https://" + value
+
+    try:
+        parsed = urlparse(value)
+
+        domain = parsed.netloc.lower()
+
+        if domain.startswith("www."):
+            domain = domain[4:]
+
+        return domain
+
+    except Exception:
+        return ""
+
+
+def contains_promotion(text: str) -> bool:
+    """
+    Detect common promotional / contact phrases.
+
+    This is deliberately simple and fast. More advanced
+    promotion classification can be performed by the AI layer.
+    """
+
+    if not text:
+        return False
+
+    text_lower = text.lower()
+
+    promotion_phrases = (
         "link in bio",
         "check bio",
         "dm me",
+        "message me",
+        "pm me",
+        "inbox me",
+        "contact me",
         "add me",
+        "join my group",
+        "join my channel",
+        "join our group",
+        "join our channel",
         "telegram.me",
-        "t.me",
-    ]
-    is_evading = any(phrase in content_lower for phrase in evasion_phrases)
+        "t.me/",
+    )
 
-    if has_link_flag or is_evading:
-      try:
-        await message.delete()
-        await message.author.timeout(
-            timedelta(hours=1),
-            reason=(
-                "Policy violation: Unauthorized links, link in bio, or DM"
-                " promotion."
-            ),
-        )
-        await message.channel.send(
-            f"{message.author.mention}, sharing links, asking for DMs, or promoting"
-            " channels is not allowed.",
-            delete_after=6,
-        )
-      except discord.Forbidden:
-        print("Missing permissions to delete message or timeout user.")
-      except discord.HTTPException as e:
-        print(f"Failed to apply moderation action: {e}")
-      return
-
-    # 2. Check for stickers or attachments (GIFs/images containing sexual/NSFW content)
-    if message.stickers or message.attachments:
-      # If using an external AI filter or keyword check on attachment file names/metadata:
-      for attachment in message.attachments:
-        file_name = attachment.filename.lower()
-        # Add basic extension block or hook into ai_filter.py here if available
-        if any(
-            ext in file_name for ext in [".gif", ".png", ".jpg", ".jpeg"]
-        ):
-          # Example: Pass attachment URL to your ai_filter.py or external scanner
-          pass
-
-
-async def setup(bot):
-  await bot.add_cog(Moderation(bot))
+    return any(
+        phrase in text_lower
+        for phrase in promotion_phrases
+    )

@@ -8,8 +8,6 @@ from collections import defaultdict
 
 from telegram import ChatPermissions, Update
 from telegram.error import BadRequest, TelegramError
-from telegram.request import HTTPXRequest
-
 from telegram.ext import (
     Application,
     ContextTypes,
@@ -347,16 +345,9 @@ async def punish_user(
     chat,
     user,
     reason: str,
-    severity: int = 80,
 ):
     """
-    Queue a moderation action for the dedicated Redis action worker.
-
-    The Telegram update handler does not wait for delete/mute/warning
-    API calls. This keeps the hot path responsive during message bursts.
-
-    The action worker is responsible for executing the Telegram action.
-    Logging/strike processing remains in the existing background pipeline.
+    Delete the offending message and restrict the user for 5 minutes.
     """
 
     message = update.effective_message
@@ -364,51 +355,90 @@ async def punish_user(
     if not message:
         return False
 
-    message_id = message.message_id
-
-    # --------------------------------------------------------
-    # DUPLICATE ACTION PROTECTION
-    # --------------------------------------------------------
-
     if action_already_started(
         chat.id,
-        message_id,
+        message.message_id,
     ):
         return False
 
     # --------------------------------------------------------
-    # QUEUE TELEGRAM ACTION
+    # DELETE
     # --------------------------------------------------------
 
     try:
-        await queue_action(
+        await message.delete()
+
+    except BadRequest:
+        # Message may already have been deleted.
+        pass
+
+    except TelegramError as error:
+        logging.warning(
+            "Could not delete message %s: %s",
+            message.message_id,
+            error,
+        )
+
+    # --------------------------------------------------------
+    # MUTE
+    # --------------------------------------------------------
+
+    try:
+        mute_until = int(time.time()) + MUTE_SECONDS
+
+        await context.bot.restrict_chat_member(
             chat_id=chat.id,
             user_id=user.id,
-            message_id=message_id,
-            action="mute",
-            reason=reason,
-            severity=int(severity),
+            permissions=ChatPermissions(
+                can_send_messages=False,
+            ),
+            until_date=mute_until,
         )
 
-        logging.info(
-            "Queued moderation action: "
-            "chat=%s user=%s message=%s severity=%s reason=%s",
-            chat.id,
+    except TelegramError as error:
+        logging.warning(
+            "Could not mute user %s: %s",
             user.id,
-            message_id,
-            severity,
-            reason,
+            error,
         )
-
-        return True
 
     except Exception:
-        # Do not report success when Redis/action queueing failed.
         logging.exception(
-            "Failed to queue moderation action"
+            "Unexpected restriction error"
         )
 
-        return False
+    # --------------------------------------------------------
+    # WARNING
+    # --------------------------------------------------------
+
+    try:
+        warning = await context.bot.send_message(
+            chat_id=chat.id,
+            text=(
+                f"⚠️ **{user.full_name}** was muted for "
+                f"5 minutes.\n\n"
+                f"**Reason:** {reason}"
+            ),
+            parse_mode="Markdown",
+        )
+
+        # Delete warning later without blocking moderation.
+        asyncio.create_task(
+            delete_warning_later(
+                context,
+                chat.id,
+                warning.message_id,
+                15,
+            )
+        )
+
+    except TelegramError as error:
+        logging.warning(
+            "Could not send warning: %s",
+            error,
+        )
+
+    return True
 
 
 async def delete_warning_later(
@@ -547,7 +577,6 @@ async def handle_sticker(
             chat,
             user,
             reason,
-            90,
         )
 
         asyncio.create_task(
@@ -572,7 +601,6 @@ async def handle_sticker(
             chat,
             user,
             reason,
-            85,
         )
 
         asyncio.create_task(
@@ -660,7 +688,6 @@ async def handle_media(
             chat,
             user,
             reason,
-            85,
         )
 
         asyncio.create_task(
@@ -754,7 +781,6 @@ async def handle_message(
             chat,
             user,
             reason,
-            95,
         )
 
         asyncio.create_task(
@@ -785,7 +811,6 @@ async def handle_message(
             chat,
             user,
             reason,
-            85,
         )
 
         asyncio.create_task(
@@ -813,7 +838,6 @@ async def handle_message(
             chat,
             user,
             reason,
-            80,
         )
 
         asyncio.create_task(
@@ -855,7 +879,6 @@ async def handle_message(
             chat,
             user,
             reason,
-            severity,
         )
 
         asyncio.create_task(
@@ -966,7 +989,6 @@ async def ai_text_worker(
                 chat,
                 user,
                 reason,
-                severity,
             )
 
             if punished:
@@ -1120,7 +1142,6 @@ async def ai_media_worker(
                 chat,
                 user,
                 reason,
-                severity,
             )
 
             if punished:
@@ -1252,18 +1273,13 @@ def main():
 
     start_keep_alive()
 
-    telegram_request = HTTPXRequest(
-        connect_timeout=30.0,
-        read_timeout=30.0,
-        write_timeout=30.0,
-        pool_timeout=30.0,
-        connection_pool_size=32,
-    )
-
     application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .request(telegram_request)
+        .connect_timeout(15.0)
+        .read_timeout(15.0)
+        .write_timeout(15.0)
+        .pool_timeout(15.0)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
