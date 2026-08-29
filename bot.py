@@ -204,7 +204,7 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
       ai = await loop.run_in_executor(None, moderate_image, file_path)
 
       if ai and ai.get("action") != "allow":
-        ai_reason = ai.get("reason", "NSFW / Inappropriate sticker content")
+        ai_reason = ai.get("reason", "NSFW / Explicit sexual sticker content detected")
         await punish_user(update, context, chat, user, ai_reason)
         await async_log_pipeline(
             context,
