@@ -257,16 +257,17 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
   if msg.photo:
     media_file = await msg.photo[-1].get_file()
     file_ext = ".jpg"
-  elif msg.animation:  # GIF support
+  elif msg.animation:
     media_file = await msg.animation.get_file()
     file_ext = ".mp4"
-  elif msg.document and msg.document.mime_type in [
-      "image/png",
-      "image/jpeg",
-      "image/webp",
-  ]:
-    media_file = await msg.document.get_file()
-    file_ext = ".png"
+  elif msg.video:
+    media_file = await msg.video.get_file()
+    file_ext = ".mp4"
+  elif msg.document:
+    mime = msg.document.mime_type or ""
+    if "image" in mime or "video" in mime or mime == "application/octet-stream":
+      media_file = await msg.document.get_file()
+      file_ext = ".mp4" if "video" in mime else ".jpg"
 
   if not media_file:
     return
@@ -309,6 +310,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
   user = update.effective_user
   text = update.message.text
   text_lower = text.lower()
+  
+  # Normalize text to catch spacing/symbol evasion tactics
+  text_clean = re.sub(r'[\s\-_.,]+', '', text_lower)
 
   if (
       chat.type == "private"
@@ -318,7 +322,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
   ):
     return
 
-  if any(word in text_lower for word in EXPLICIT_BANNED_WORDS):
+  normalized_banned = [re.sub(r'[\s\-_.,]+', '', w.lower()) for w in EXPLICIT_BANNED_WORDS]
+
+  if any(word in text_lower for word in EXPLICIT_BANNED_WORDS) or any(nb in text_clean for nb in normalized_banned if len(nb) > 2):
     reason = "Use of prohibited abusive words"
     await punish_user(update, context, chat, user, reason)
     asyncio.create_task(async_log_pipeline(context, chat.id, user, reason, 90))
@@ -384,7 +390,7 @@ def main():
   app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
   app.add_handler(
       MessageHandler(
-          filters.PHOTO | filters.ANIMATION | filters.Document.ALL, handle_media
+          filters.PHOTO | filters.ANIMATION | filters.VIDEO | filters.Document.ALL, handle_media
       )
   )
   app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
