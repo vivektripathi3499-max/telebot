@@ -173,6 +173,8 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
   user = update.effective_user
   sticker = update.message.sticker
 
+  print(f"[DEBUG STICKER] Incoming Chat ID: {chat.id} (Allowed: {ALLOWED_GROUPS})")
+
   if (
       chat.type == "private"
       or (ALLOWED_GROUPS and chat.id not in ALLOWED_GROUPS)
@@ -194,7 +196,6 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(async_log_pipeline(context, chat.id, user, reason, 85))
     return
 
-  # RAM-backed /tmp path for maximum speed file processing
   async def run_sticker_ai_background():
     file_path = f"/tmp/temp_sticker_{user.id}_{int(time.time())}.webp"
     try:
@@ -233,6 +234,8 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
   chat = update.effective_chat
   user = update.effective_user
   msg = update.message
+
+  print(f"[DEBUG MEDIA] Incoming Chat ID: {chat.id} (Allowed: {ALLOWED_GROUPS})")
 
   if (
       chat.type == "private"
@@ -311,7 +314,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
   text = update.message.text
   text_lower = text.lower()
   
-  # Normalize text to catch spacing/symbol evasion tactics
   text_clean = re.sub(r'[\s\-_.,]+', '', text_lower)
 
   if (
