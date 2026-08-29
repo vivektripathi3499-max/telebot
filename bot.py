@@ -21,92 +21,53 @@ from telegram.ext import (
 )
 from welcome import welcome
 
-EXPLICIT_BANNED_WORDS = [
-    "tmkc",
-    "bsdk",
-    "madarchot",
-    "bhosadike",
-    "Bkl",
-    "bkl",
-    "Mdrcd",
-    "Mdrchd",
-    "Saala",
-    "Saali",
-    "Add me",
-    "Added",
-    "Msg me",
-    "dm me",
-    "inbox me",
-    "come inbox",
-    "pm me",
-    "sex video",
-    "adult video",
-    "hot video",
-    "mms",
-    "want fun",
-    "video call",
-    "whatsapp number",
-    "telegram dm",
+INSTANT_BLOCK_WORDS = [
+    "tmkc", "bsdk", "madarchot", "bhosadike", "bkl", "mdrcd", "mdrchd",
+    "behenchot", "bhenchod", "chutiya", "gandu", "laude", "loda", "mms",
+    "sex video", "adult video", "hot video", "dm me", "inbox me", "come inbox",
+    "pm me", "want fun", "video call", "whatsapp number", "telegram dm"
 ]
 
 BANNED_STICKER_SETS = set()
 RESTRICTED_STICKER_EMOJIS = {"🖕", "🤬", "💩"}
 
 PROMOTION_PHRASES = [
-    "link in bio",
-    "check bio",
-    "dm me",
-    "add me on",
-    "telegram.me",
-    "t.me",
-    "whatsapp",
-    "snapchat",
+    "link in bio", "check bio", "dm me", "add me on",
+    "telegram.me", "t.me", "whatsapp", "snapchat",
 ]
 
 user_sticker_timestamps = defaultdict(list)
 STICKER_RATE_LIMIT_COUNT = 3
 STICKER_RATE_LIMIT_WINDOW = 5.0
 
-# --- IN-MEMORY ADMIN CACHE TO SPEED UP LOOKUPS (TTL = 5 mins) ---
 admin_cache = {}
 ADMIN_CACHE_TTL = 300
 
-
-# --- KEEP-ALIVE WEB SERVER FOR RENDER FREE TIER ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
-
   def do_GET(self):
     self.send_response(200)
     self.end_headers()
-    self.wfile.write(b"Telegram Moderator Bot is active and running!")
-
+    self.wfile.write(b"Bot is active!")
   def log_message(self, format, *args):
     return
-
 
 def run_http_server():
   port = int(os.environ.get("PORT", 10000))
   server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
   server.serve_forever()
 
-
 def start_keep_alive():
   t = threading.Thread(target=run_http_server)
   t.daemon = True
   t.start()
 
-
 async def is_admin(chat, user_id):
   now = time.time()
   cache_key = (chat.id, user_id)
-
-  # Check cache first for 0ms lookup latency
   if cache_key in admin_cache:
     is_adm, timestamp = admin_cache[cache_key]
     if now - timestamp < ADMIN_CACHE_TTL:
       return is_adm
-
-  # Fetch from Telegram API only if cache expired or missing
   try:
     member = await chat.get_member(user_id)
     result = member.status in ("administrator", "creator")
@@ -115,14 +76,11 @@ async def is_admin(chat, user_id):
   except Exception:
     return False
 
-
 def has_excessive_special_chars(text):
   special_chars = re.findall(r"[^a-zA-Z0-9\s]", text)
   return len(special_chars) > 2
 
-
 async def punish_user(update, context, chat, user, reason):
-  """Instant punishment pipeline: Deletes message and mutes user for 5 minutes with 0ms delay."""
   try:
     await update.message.delete()
   except BadRequest:
@@ -142,15 +100,11 @@ async def punish_user(update, context, chat, user, reason):
   try:
     await context.bot.send_message(
         chat_id=chat.id,
-        text=(
-            f"⚠️ **{user.full_name}** was muted for 5 minutes. Reason:"
-            f" *{reason}*"
-        ),
+        text=f"⚠️ **{user.full_name}** was muted for 5 minutes. Reason: *{reason}*",
         parse_mode="Markdown",
     )
   except Exception:
     pass
-
 
 def check_sticker_flood(user_id):
   now = time.time()
@@ -160,124 +114,73 @@ def check_sticker_flood(user_id):
   user_sticker_timestamps[user_id] = timestamps
   return len(timestamps) > STICKER_RATE_LIMIT_COUNT
 
-
-# --- NON-BLOCKING BACKGROUND LOGGING PIPELINE ---
-async def async_log_pipeline(
-    context, chat_id, user, reason, severity, is_strike=True
-):
+async def async_log_pipeline(context, chat_id, user, reason, severity, is_strike=True):
   try:
     name = user.username or user.full_name
-    if is_strike:
-      _, action = add_strike(chat_id, user.id, name, reason)
-    else:
-      action = "mute"
+    action = add_strike(chat_id, user.id, name, reason)[1] if is_strike else "mute"
     save_log(chat_id, user.id, action, reason, severity)
     await send_log(context, name, user.id, action, reason, severity)
   except Exception as e:
-    print(f"Logging pipeline error: {e}")
-
+    print(f"Logging error: {e}")
 
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
   if not update.message or not update.message.sticker:
     return
-
   chat = update.effective_chat
   user = update.effective_user
   sticker = update.message.sticker
 
-  print(f"[DEBUG STICKER] Incoming Chat ID: {chat.id} (Allowed: {ALLOWED_GROUPS})")
-
-  if (
-      chat.type == "private"
-      or (ALLOWED_GROUPS and chat.id not in ALLOWED_GROUPS)
-      or user.is_bot
-      or await is_admin(chat, user.id)
-  ):
+  if chat.type == "private" or (ALLOWED_GROUPS and chat.id not in ALLOWED_GROUPS) or user.is_bot or await is_admin(chat, user.id):
     return
 
-  reason = None
-  if sticker.set_name and sticker.set_name in BANNED_STICKER_SETS:
-    reason = "Prohibited sticker pack detected"
-  elif sticker.emoji and sticker.emoji in RESTRICTED_STICKER_EMOJIS:
-    reason = "Inappropriate emoji attached to sticker"
-  elif check_sticker_flood(user.id):
-    reason = "Sticker spamming / flooding"
-
-  if reason:
-    await punish_user(update, context, chat, user, reason)
-    asyncio.create_task(async_log_pipeline(context, chat.id, user, reason, 85))
-    return
-
-  async def run_sticker_ai_background():
-    file_path = f"/tmp/temp_sticker_{user.id}_{int(time.time())}.webp"
+  async def run_sticker_ai():
+    file_path = f"/tmp/sticker_{user.id}_{int(time.time())}.webp"
     try:
       file = await sticker.get_file()
       await file.download_to_drive(file_path)
       loop = asyncio.get_running_loop()
       ai = await loop.run_in_executor(None, moderate_image, file_path)
-
       if ai and ai.get("action") != "allow":
-        ai_reason = ai.get("reason", "NSFW / Explicit sexual sticker content detected")
-        await punish_user(update, context, chat, user, ai_reason)
-        await async_log_pipeline(
-            context,
-            chat.id,
-            user,
-            ai_reason,
-            ai.get("severity", 90),
-            is_strike=True,
-        )
+        reason = ai.get("reason", "NSFW / Inappropriate sticker")
+        await punish_user(update, context, chat, user, reason)
+        asyncio.create_task(async_log_pipeline(context, chat.id, user, reason, 90))
     except Exception as e:
-      print(f"Background Sticker AI error: {e}")
+      print(f"Sticker AI error: {e}")
     finally:
       if os.path.exists(file_path):
-        try:
-          os.remove(file_path)
-        except Exception:
-          pass
+        try: os.remove(file_path)
+        except: pass
 
-  asyncio.create_task(run_sticker_ai_background())
-
+  asyncio.create_task(run_sticker_ai())
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
   if not update.message:
     return
-
   chat = update.effective_chat
   user = update.effective_user
   msg = update.message
 
-  print(f"[DEBUG MEDIA] Incoming Chat ID: {chat.id} (Allowed: {ALLOWED_GROUPS})")
-
-  if (
-      chat.type == "private"
-      or (ALLOWED_GROUPS and chat.id not in ALLOWED_GROUPS)
-      or user.is_bot
-      or await is_admin(chat, user.id)
-  ):
+  if chat.type == "private" or (ALLOWED_GROUPS and chat.id not in ALLOWED_GROUPS) or user.is_bot or await is_admin(chat, user.id):
     return
 
   caption = msg.caption or ""
-  
-  # Normalize caption to catch words embedded inside sentences
   caption_lower = caption.lower()
   caption_clean = re.sub(r'[\s\-_.,]+', '', caption_lower)
-  normalized_banned = [re.sub(r'[\s\-_.,]+', '', w.lower()) for w in EXPLICIT_BANNED_WORDS]
+  normalized_instant = [re.sub(r'[\s\-_.,]+', '', w.lower()) for w in INSTANT_BLOCK_WORDS]
 
   if (
       contains_link(caption)
       or any(p in caption_lower for p in PROMOTION_PHRASES)
-      or any(word in caption_lower for word in EXPLICIT_BANNED_WORDS)
-      or any(nb in caption_clean for nb in normalized_banned if len(nb) > 2)
+      or any(word in caption_lower for word in INSTANT_BLOCK_WORDS)
+      or any(nb in caption_clean for nb in normalized_instant if len(nb) > 2)
   ):
-    reason = "Unauthorized link, promotion, or prohibited words in media caption"
+    reason = "Prohibited text, link, or solicitation in media caption"
     await punish_user(update, context, chat, user, reason)
     asyncio.create_task(async_log_pipeline(context, chat.id, user, reason, 85))
     return
 
   media_file = None
   file_ext = ".jpg"
-
   if msg.photo:
     media_file = await msg.photo[-1].get_file()
     file_ext = ".jpg"
@@ -296,68 +199,46 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
   if not media_file:
     return
 
-  async def run_media_ai_background():
-    file_path = f"/tmp/temp_media_{user.id}_{int(time.time())}{file_ext}"
+  async def run_media_ai():
+    file_path = f"/tmp/media_{user.id}_{int(time.time())}{file_ext}"
     try:
       await media_file.download_to_drive(file_path)
       loop = asyncio.get_running_loop()
       ai = await loop.run_in_executor(None, moderate_image, file_path)
-
       if ai and ai.get("action") != "allow":
-        ai_reason = ai.get("reason", "NSFW / Explicit media content detected")
-        await punish_user(update, context, chat, user, ai_reason)
-        await async_log_pipeline(
-            context,
-            chat.id,
-            user,
-            ai_reason,
-            ai.get("severity", 95),
-            is_strike=True,
-        )
+        reason = ai.get("reason", "NSFW / Explicit media content")
+        await punish_user(update, context, chat, user, reason)
+        asyncio.create_task(async_log_pipeline(context, chat.id, user, reason, 95))
     except Exception as e:
-      print(f"Background Media AI error: {e}")
+      print(f"Media AI error: {e}")
     finally:
       if os.path.exists(file_path):
-        try:
-          os.remove(file_path)
-        except Exception:
-          pass
+        try: os.remove(file_path)
+        except: pass
 
-  asyncio.create_task(run_media_ai_background())
-
+  asyncio.create_task(run_media_ai())
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
   if not update.message or not update.message.text:
     return
-
   chat = update.effective_chat
   user = update.effective_user
   text = update.message.text
   text_lower = text.lower()
-  
-  # Normalize text to catch words embedded anywhere inside sentences or obscured with punctuation/spaces
   text_clean = re.sub(r'[\s\-_.,]+', '', text_lower)
 
-  if (
-      chat.type == "private"
-      or (ALLOWED_GROUPS and chat.id not in ALLOWED_GROUPS)
-      or user.is_bot
-      or await is_admin(chat, user.id)
-  ):
+  if chat.type == "private" or (ALLOWED_GROUPS and chat.id not in ALLOWED_GROUPS) or user.is_bot or await is_admin(chat, user.id):
     return
 
-  normalized_banned = [re.sub(r'[\s\-_.,]+', '', w.lower()) for w in EXPLICIT_BANNED_WORDS]
-
-  # Check if any banned word appears as a standalone substring or embedded inside other words/sentences
-  if any(word in text_lower for word in EXPLICIT_BANNED_WORDS) or any(nb in text_clean for nb in normalized_banned if len(nb) > 2):
-    reason = "Use of prohibited abusive words or solicitation"
+  normalized_instant = [re.sub(r'[\s\-_.,]+', '', w.lower()) for w in INSTANT_BLOCK_WORDS]
+  if any(word in text_lower for word in INSTANT_BLOCK_WORDS) or any(nb in text_clean for nb in normalized_instant if len(nb) > 2):
+    reason = "Use of severe abuse, insults, or adult solicitation"
     await punish_user(update, context, chat, user, reason)
-    asyncio.create_task(async_log_pipeline(context, chat.id, user, reason, 90))
+    asyncio.create_task(async_log_pipeline(context, chat.id, user, reason, 95))
     return
 
-  is_evading = any(phrase in text_lower for phrase in PROMOTION_PHRASES)
-  if contains_link(text) or is_evading:
-    reason = "Unauthorized link, channel promotion, or DM solicitation"
+  if contains_link(text) or any(p in text_lower for p in PROMOTION_PHRASES):
+    reason = "Unauthorized link or promotion"
     await punish_user(update, context, chat, user, reason)
     asyncio.create_task(async_log_pipeline(context, chat.id, user, reason, 85))
     return
@@ -371,61 +252,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
   spam = check_spam(chat.id, user.id, text)
   if spam["spam"]:
     await punish_user(update, context, chat, user, spam["reason"])
-    asyncio.create_task(
-        async_log_pipeline(
-            context, chat.id, user, spam["reason"], spam["severity"]
-        )
-    )
+    asyncio.create_task(async_log_pipeline(context, chat.id, user, spam["reason"], spam["severity"]))
     return
 
   async def run_ai_background():
     try:
       loop = asyncio.get_running_loop()
       ai = await loop.run_in_executor(None, moderate_message, text)
-
       if ai and ai.get("action") != "allow":
-        ai_reason = ai.get("reason", "AI Moderation Flag")
-        await punish_user(update, context, chat, user, ai_reason)
-        await async_log_pipeline(
-            context,
-            chat.id,
-            user,
-            ai_reason,
-            ai.get("severity", 50),
-            is_strike=True,
-        )
+        reason = ai.get("reason", "AI Moderation Flag")
+        await punish_user(update, context, chat, user, reason)
+        asyncio.create_task(async_log_pipeline(context, chat.id, user, reason, ai.get("severity", 60)))
     except Exception as e:
-      print(f"Background AI worker exception: {e}")
+      print(f"AI error: {e}")
 
   asyncio.create_task(run_ai_background())
 
-
 def main():
   start_keep_alive()
-
-  app = (
-      Application.builder()
-      .token(BOT_TOKEN)
-      .connect_timeout(15.0)
-      .read_timeout(15.0)
-      .build()
-  )
+  app = Application.builder().token(BOT_TOKEN).connect_timeout(15.0).read_timeout(15.0).build()
 
   app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
   app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
-  app.add_handler(
-      MessageHandler(
-          filters.PHOTO | filters.ANIMATION | filters.VIDEO | filters.Document.ALL, handle_media
-      )
-  )
+  app.add_handler(MessageHandler(filters.PHOTO | filters.ANIMATION | filters.VIDEO | filters.Document.ALL, handle_media))
   app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-  print(
-      "Lightning-fast bot online with Admin Cache TTL, RAM disk files, and"
-      " active NSFW protection!"
-  )
+  print("⚡ Lightning-fast moderation bot online with unique welcome greets & zero-delay defense!")
   app.run_polling()
-
 
 if __name__ == "__main__":
   main()
