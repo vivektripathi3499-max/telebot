@@ -32,6 +32,9 @@ EXPLICIT_BANNED_WORDS = [
     "Mdrchd",
     "Saala",
     "Saali",
+    "Add me",
+    "Added",
+    "Msg me",
 ]
 
 BANNED_STICKER_SETS = set()
